@@ -21,6 +21,8 @@ def _build_session() -> requests.Session:
 
     session = requests.Session()
 
+    # NOTE: We deliberately omit Accept-Encoding so requests handles
+    # decompression automatically — avoids garbled gzip/brotli responses
     if not is_ff:
         browser_version = ua.split("Chrome/")[1].split(".")[0]
         is_edge = "Edg" in ua
@@ -34,7 +36,6 @@ def _build_session() -> requests.Session:
             "User-Agent":                ua,
             "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language":           "en-US,en;q=0.9",
-            "Accept-Encoding":           "gzip, deflate, br",
             "sec-ch-ua":                 sec_ch_ua,
             "sec-ch-ua-mobile":          "?0",
             "sec-ch-ua-platform":        '"Windows"' if "Windows" in ua else '"macOS"',
@@ -51,7 +52,6 @@ def _build_session() -> requests.Session:
             "User-Agent":                ua,
             "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language":           "en-US,en;q=0.5",
-            "Accept-Encoding":           "gzip, deflate, br",
             "sec-fetch-dest":            "document",
             "sec-fetch-mode":            "navigate",
             "sec-fetch-site":            "none",
@@ -68,8 +68,12 @@ def _build_session() -> requests.Session:
     # Visit homepage first to get session cookies
     try:
         print("[scraper] Visiting homepage to collect session cookies...")
-        resp = session.get("https://www.pakwheels.com/", timeout=20)
-        print(f"[scraper] Homepage status: {resp.status_code} | Cookies: {dict(session.cookies)}")
+        resp = session.get(
+            "https://www.pakwheels.com/",
+            timeout=20,
+            stream=False
+        )
+        print(f"[scraper] Homepage status: {resp.status_code} | Encoding: {resp.encoding}")
         time.sleep(random.uniform(2, 4))
     except Exception as e:
         print(f"[scraper] Homepage visit failed (non-fatal): {e}")
@@ -93,20 +97,27 @@ def get_soup(url: str, referer: str = "https://www.pakwheels.com/") -> Beautiful
     _SESSION.headers["sec-fetch-site"] = "same-origin"
 
     try:
-        resp = _SESSION.get(url, timeout=20)
-        print(f"[scraper] GET {url} → status {resp.status_code} | size {len(resp.text)} chars")
+        resp = _SESSION.get(url, timeout=20, stream=False)
+        print(f"[scraper] GET {url} → status {resp.status_code} | encoding: {resp.encoding} | size: {len(resp.text)} chars")
 
         resp.raise_for_status()
 
-        # Debug: print first 500 chars to see what was returned
-        preview = resp.text[:500].replace("\n", " ").strip()
-        print(f"[scraper] Page preview: {preview}")
+        # Use resp.text which requests decodes properly
+        html = resp.text
 
-        if "captcha" in resp.text.lower() or "blocked" in resp.text.lower():
-            print(f"[scraper] WARNING: Possible block/CAPTCHA detected")
+        # Debug: show page title area
+        if "<title>" in html:
+            start = html.find("<title>")
+            end   = html.find("</title>", start)
+            print(f"[scraper] Page title: {html[start:end+8]}")
+        else:
+            print("[scraper] No <title> tag found in response")
+
+        if "captcha" in html.lower() or "blocked" in html.lower():
+            print("[scraper] WARNING: Possible block/CAPTCHA detected")
             return None
 
-        return BeautifulSoup(resp.text, "lxml")
+        return BeautifulSoup(html, "lxml")
 
     except requests.exceptions.HTTPError as e:
         print(f"[scraper] HTTP error {e.response.status_code} for {url}")
@@ -119,20 +130,13 @@ def get_soup(url: str, referer: str = "https://www.pakwheels.com/") -> Beautiful
 def parse_search_page(soup: BeautifulSoup) -> list[dict]:
     listings = []
 
-    # Debug: check what we actually got
-    title_tag = soup.find("title")
-    print(f"[scraper] Page title: {title_tag.get_text() if title_tag else 'NO TITLE FOUND'}")
-
     cards = soup.select("li.classified-listing")
-    print(f"[scraper] Cards found with selector 'li.classified-listing': {len(cards)}")
+    print(f"[scraper] Cards found: {len(cards)}")
 
-    # Try alternative selectors if main one fails
+    # Try fallback selector
     if not cards:
-        alt1 = soup.select("li[data-listing-id]")
-        print(f"[scraper] Cards with 'li[data-listing-id]': {len(alt1)}")
-        alt2 = soup.select(".classified-listing")
-        print(f"[scraper] Cards with '.classified-listing': {len(alt2)}")
-        cards = alt1 or alt2
+        cards = soup.select("li[data-listing-id]")
+        print(f"[scraper] Fallback cards found: {len(cards)}")
 
     for card in cards:
         is_featured = "featured-listing" in card.get("class", [])
@@ -142,7 +146,6 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
 
         anchor = card.select_one("a.car-name.ad-detail-path")
         if not anchor:
-            # Try alternative
             anchor = card.select_one("a[href*='/used-cars/']")
         if not anchor:
             continue
