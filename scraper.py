@@ -10,36 +10,23 @@ from config import (
     MAX_PAGES,
 )
 
-# ============================================================
-# Session setup — mimics a real browser visit
-# ============================================================
-# We use a persistent requests.Session so cookies are carried
-# across requests (just like a real browser would do).
-# We visit the homepage first to pick up session cookies,
-# then use those cookies for all subsequent requests.
 
 def _build_session() -> requests.Session:
     """
-    Create a requests Session that looks like a real browser:
-      - Random User-Agent chosen per session
-      - Full Chrome-like headers including sec-fetch-* and sec-ch-ua
-      - Visits PakWheels homepage first to collect session cookies
-      - Random startup delay to avoid robotic exact-on-the-minute hits
+    Create a requests Session that looks like a real browser.
+    Visits PakWheels homepage first to collect session cookies.
     """
     ua = random.choice(USER_AGENTS)
-    is_chrome = "Chrome" in ua and "Edg" not in ua
-    is_edge   = "Edg" in ua
-    is_ff     = "Firefox" in ua
+    is_ff = "Firefox" in ua
 
     session = requests.Session()
 
-    # Build realistic headers matching the chosen browser
-    if is_chrome or is_edge:
-        browser_name    = "Chromium"
+    if not is_ff:
         browser_version = ua.split("Chrome/")[1].split(".")[0]
-        brand           = '"Microsoft Edge"' if is_edge else '"Google Chrome"'
+        is_edge = "Edg" in ua
+        brand = '"Microsoft Edge"' if is_edge else '"Google Chrome"'
         sec_ch_ua = (
-            f'"{browser_name}";v="{browser_version}", '
+            f'"Chromium";v="{browser_version}", '
             f'{brand};v="{browser_version}", '
             '"Not-A.Brand";v="99"'
         )
@@ -60,7 +47,6 @@ def _build_session() -> requests.Session:
             "Connection":                "keep-alive",
         })
     else:
-        # Firefox headers
         session.headers.update({
             "User-Agent":                ua,
             "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -74,30 +60,27 @@ def _build_session() -> requests.Session:
             "Connection":                "keep-alive",
         })
 
-    # Random startup delay (0–90 seconds) so the job doesn't always
-    # fire at the exact same second each run — looks more human
-    startup_delay = random.randint(0, 90)
+    # Random startup delay (0–60s)
+    startup_delay = random.randint(0, 60)
     print(f"[scraper] Startup delay: {startup_delay}s  |  UA: {ua[:60]}...")
     time.sleep(startup_delay)
 
     # Visit homepage first to get session cookies
     try:
         print("[scraper] Visiting homepage to collect session cookies...")
-        session.get("https://www.pakwheels.com/", timeout=20)
-        # Small pause after homepage — like a human reading it briefly
-        time.sleep(random.uniform(2, 5))
+        resp = session.get("https://www.pakwheels.com/", timeout=20)
+        print(f"[scraper] Homepage status: {resp.status_code} | Cookies: {dict(session.cookies)}")
+        time.sleep(random.uniform(2, 4))
     except Exception as e:
         print(f"[scraper] Homepage visit failed (non-fatal): {e}")
 
     return session
 
 
-# Module-level session — created once per script run
 _SESSION = _build_session()
 
 
 def _human_delay(min_s: float = None, max_s: float = None):
-    """Sleep for a random duration between min_s and max_s seconds."""
     lo = min_s if min_s is not None else REQUEST_DELAY_MIN
     hi = max_s if max_s is not None else REQUEST_DELAY_MAX
     delay = random.uniform(lo, hi)
@@ -106,21 +89,21 @@ def _human_delay(min_s: float = None, max_s: float = None):
 
 
 def get_soup(url: str, referer: str = "https://www.pakwheels.com/") -> BeautifulSoup | None:
-    """
-    Fetch a URL using the persistent session and return a BeautifulSoup.
-    Updates the Referer header to simulate natural navigation.
-    Returns None on failure.
-    """
     _SESSION.headers["Referer"]        = referer
     _SESSION.headers["sec-fetch-site"] = "same-origin"
 
     try:
         resp = _SESSION.get(url, timeout=20)
+        print(f"[scraper] GET {url} → status {resp.status_code} | size {len(resp.text)} chars")
+
         resp.raise_for_status()
 
-        # Detect if we've been served a CAPTCHA or block page
+        # Debug: print first 500 chars to see what was returned
+        preview = resp.text[:500].replace("\n", " ").strip()
+        print(f"[scraper] Page preview: {preview}")
+
         if "captcha" in resp.text.lower() or "blocked" in resp.text.lower():
-            print(f"[scraper] WARNING: Possible block/CAPTCHA detected at {url}")
+            print(f"[scraper] WARNING: Possible block/CAPTCHA detected")
             return None
 
         return BeautifulSoup(resp.text, "lxml")
@@ -133,19 +116,23 @@ def get_soup(url: str, referer: str = "https://www.pakwheels.com/") -> Beautiful
         return None
 
 
-# ============================================================
-# Parsing helpers
-# ============================================================
-
 def parse_search_page(soup: BeautifulSoup) -> list[dict]:
-    """
-    Extract basic listing info from the search results page.
-    Returns a list of dicts with keys:
-        url, title, price, city, year, mileage,
-        fuel, cc, transmission, is_featured
-    """
     listings = []
+
+    # Debug: check what we actually got
+    title_tag = soup.find("title")
+    print(f"[scraper] Page title: {title_tag.get_text() if title_tag else 'NO TITLE FOUND'}")
+
     cards = soup.select("li.classified-listing")
+    print(f"[scraper] Cards found with selector 'li.classified-listing': {len(cards)}")
+
+    # Try alternative selectors if main one fails
+    if not cards:
+        alt1 = soup.select("li[data-listing-id]")
+        print(f"[scraper] Cards with 'li[data-listing-id]': {len(alt1)}")
+        alt2 = soup.select(".classified-listing")
+        print(f"[scraper] Cards with '.classified-listing': {len(alt2)}")
+        cards = alt1 or alt2
 
     for card in cards:
         is_featured = "featured-listing" in card.get("class", [])
@@ -153,10 +140,13 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
         if not INCLUDE_FEATURED and is_featured:
             continue
 
-        # URL & Title
         anchor = card.select_one("a.car-name.ad-detail-path")
         if not anchor:
+            # Try alternative
+            anchor = card.select_one("a[href*='/used-cars/']")
+        if not anchor:
             continue
+
         relative_url = anchor.get("href", "")
         url = (
             f"https://www.pakwheels.com{relative_url}"
@@ -166,15 +156,12 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
         title_tag = anchor.select_one("h3")
         title = title_tag.get_text(strip=True) if title_tag else "N/A"
 
-        # Price
         price_tag = card.select_one("div.price-details")
         price = price_tag.get_text(strip=True) if price_tag else "N/A"
 
-        # City
         city_tag = card.select_one("ul.search-vehicle-info li")
         city = city_tag.get_text(strip=True) if city_tag else "N/A"
 
-        # Year / Mileage / Fuel / CC / Transmission
         specs        = card.select("ul.search-vehicle-info-2 li")
         year         = specs[0].get_text(strip=True) if len(specs) > 0 else "N/A"
         mileage      = specs[1].get_text(strip=True) if len(specs) > 1 else "N/A"
@@ -199,11 +186,6 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
 
 
 def parse_listing_page(url: str, referer: str) -> dict:
-    """
-    Fetch an individual car listing page and extract:
-        seller_name, registered_in, color, seller_comments
-    Uses a human-like random delay before each request.
-    """
     result = {
         "seller_name":     "",
         "registered_in":   "",
@@ -216,12 +198,10 @@ def parse_listing_page(url: str, referer: str) -> dict:
     if not soup:
         return result
 
-    # Seller name
     seller_tag = soup.select_one(".owner-details h5.nomargin")
     if seller_tag:
         result["seller_name"] = seller_tag.get_text(strip=True)
 
-    # Registered In / Color from ul.ul-featured
     feature_items = soup.select("ul.ul-featured li")
     i = 0
     while i < len(feature_items) - 1:
@@ -233,7 +213,6 @@ def parse_listing_page(url: str, referer: str) -> dict:
             result["color"] = value
         i += 2
 
-    # Seller comments
     comments_heading = soup.find("h2", id="scroll_seller_comments")
     if comments_heading:
         comments_div = comments_heading.find_next_sibling("div")
@@ -246,10 +225,6 @@ def parse_listing_page(url: str, referer: str) -> dict:
 
 
 def scrape_all_listings(search_url: str) -> list[dict]:
-    """
-    Scrape the search page (up to MAX_PAGES) and return
-    a list of basic listing dicts.
-    """
     all_listings = []
 
     for page in range(1, MAX_PAGES + 1):
@@ -270,7 +245,6 @@ def scrape_all_listings(search_url: str) -> list[dict]:
         all_listings.extend(listings)
         print(f"[scraper] Found {len(listings)} listings on page {page}")
 
-        # Pause between pages like a human would
         if page < MAX_PAGES:
             _human_delay(3, 7)
 
