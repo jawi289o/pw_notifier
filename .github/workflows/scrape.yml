@@ -1,13 +1,6 @@
 name: PakWheels Scraper
 
 on:
-  schedule:
-    # Runs every 15 minutes
-    # The scraper itself adds a random 0-90s startup delay
-    # so it never fires at the exact same second each time
-    - cron: "*/15 * * * *"
-
-  # Allows manual trigger from the Actions tab for testing
   workflow_dispatch:
 
 jobs:
