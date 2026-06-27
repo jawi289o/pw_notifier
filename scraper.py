@@ -104,24 +104,15 @@ def get_soup(url: str, referer: str = "https://www.pakwheels.com/") -> Beautiful
 
 
 def parse_search_page(soup: BeautifulSoup) -> list[dict]:
-    """
-    Extract listings using data-listing-id as the primary identifier.
-    This is more reliable than anchor-based selectors since all 24 cards
-    have this attribute regardless of their position in the page.
-    Uses a seen_ids set to avoid processing the same listing twice
-    (the page repeats contact_seller_div blocks which can confuse parsers).
-    """
-    listings  = []
-    seen_ids  = set()
+    listings = []
+    seen_ids = set()
 
-    # Select ALL li elements that have a data-listing-id attribute
     cards = soup.select("li[data-listing-id]")
     print(f"[scraper] Cards found with data-listing-id: {len(cards)}")
 
     for card in cards:
         listing_id = card.get("data-listing-id", "").strip()
 
-        # Skip duplicates — same listing can appear in multiple ul blocks
         if not listing_id or listing_id in seen_ids:
             continue
         seen_ids.add(listing_id)
@@ -131,7 +122,6 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
         if not INCLUDE_FEATURED and is_featured:
             continue
 
-        # Get URL from the car-name anchor
         anchor = card.select_one("a.car-name.ad-detail-path")
         if anchor:
             relative_url = anchor.get("href", "")
@@ -143,7 +133,6 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
             title_tag = anchor.select_one("h3")
             title = title_tag.get_text(strip=True) if title_tag else "N/A"
         else:
-            # Fallback: build URL from listing ID and title from h3
             h3 = card.select_one("h3")
             title = h3.get_text(strip=True) if h3 else "N/A"
             url = f"https://www.pakwheels.com/used-cars/listing-{listing_id}"
@@ -180,6 +169,14 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
 
 
 def parse_listing_page(url: str, referer: str) -> dict:
+    """
+    Extract seller name, registered in, color, seller comments
+    from an individual listing page.
+
+    Handles two seller types:
+      1. Regular user  → h5.nomargin inside .owner-details
+      2. Managed by PakWheels → uses listing ID as unique identifier
+    """
     result = {
         "seller_name":     "",
         "registered_in":   "",
@@ -192,10 +189,40 @@ def parse_listing_page(url: str, referer: str) -> dict:
     if not soup:
         return result
 
+    # --- Seller name ---
+    # Case 1: Regular user listing → h5.nomargin inside .owner-details
     seller_tag = soup.select_one(".owner-details h5.nomargin")
     if seller_tag:
         result["seller_name"] = seller_tag.get_text(strip=True)
 
+    # Case 2: Managed by PakWheels → branch name + listing ID
+    # e.g. "PakWheels Lahore_11473967"
+    # We combine branch + listing ID because one branch can have many cars.
+    # Using ID alone catches the same listing if reposted; branch alone
+    # would incorrectly block all future cars from that branch.
+    if not result["seller_name"]:
+        dealer_tag = soup.select_one(".seller-info a")
+        if dealer_tag:
+            branch = dealer_tag.get_text(strip=True)
+            parts = url.rstrip("/").split("-")
+            listing_id = parts[-1] if parts and parts[-1].isdigit() else "unknown"
+            result["seller_name"] = f"{branch}_{listing_id}"
+            print(f"[scraper] Managed by PakWheels → seller key: {result['seller_name']}")
+
+    # Case 3: Fallback — extract text from sticky user info panel
+    if not result["seller_name"]:
+        sticky = soup.select_one(".sticky-user-info")
+        if sticky:
+            import re
+            for child in sticky.children:
+                text = str(child).strip()
+                if text and not text.startswith("<"):
+                    cleaned = re.sub(r"\s+", " ", text).strip()
+                    if cleaned:
+                        result["seller_name"] = cleaned
+                        break
+
+    # --- Registered In / Color ---
     feature_items = soup.select("ul.ul-featured li")
     i = 0
     while i < len(feature_items) - 1:
@@ -207,6 +234,7 @@ def parse_listing_page(url: str, referer: str) -> dict:
             result["color"] = value
         i += 2
 
+    # --- Seller comments ---
     comments_heading = soup.find("h2", id="scroll_seller_comments")
     if comments_heading:
         comments_div = comments_heading.find_next_sibling("div")
