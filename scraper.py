@@ -12,17 +12,10 @@ from config import (
 
 
 def _build_session() -> requests.Session:
-    """
-    Create a requests Session that looks like a real browser.
-    Visits PakWheels homepage first to collect session cookies.
-    """
     ua = random.choice(USER_AGENTS)
     is_ff = "Firefox" in ua
-
     session = requests.Session()
 
-    # NOTE: We deliberately omit Accept-Encoding so requests handles
-    # decompression automatically — avoids garbled gzip/brotli responses
     if not is_ff:
         browser_version = ua.split("Chrome/")[1].split(".")[0]
         is_edge = "Edg" in ua
@@ -60,20 +53,14 @@ def _build_session() -> requests.Session:
             "Connection":                "keep-alive",
         })
 
-    # Random startup delay (0–60s)
     startup_delay = random.randint(0, 60)
     print(f"[scraper] Startup delay: {startup_delay}s  |  UA: {ua[:60]}...")
     time.sleep(startup_delay)
 
-    # Visit homepage first to get session cookies
     try:
         print("[scraper] Visiting homepage to collect session cookies...")
-        resp = session.get(
-            "https://www.pakwheels.com/",
-            timeout=20,
-            stream=False
-        )
-        print(f"[scraper] Homepage status: {resp.status_code} | Encoding: {resp.encoding}")
+        resp = session.get("https://www.pakwheels.com/", timeout=20, stream=False)
+        print(f"[scraper] Homepage status: {resp.status_code}")
         time.sleep(random.uniform(2, 4))
     except Exception as e:
         print(f"[scraper] Homepage visit failed (non-fatal): {e}")
@@ -98,20 +85,9 @@ def get_soup(url: str, referer: str = "https://www.pakwheels.com/") -> Beautiful
 
     try:
         resp = _SESSION.get(url, timeout=20, stream=False)
-        print(f"[scraper] GET {url} → status {resp.status_code} | encoding: {resp.encoding} | size: {len(resp.text)} chars")
-
+        print(f"[scraper] GET → status {resp.status_code} | size: {len(resp.text)} chars")
         resp.raise_for_status()
-
-        # Use resp.text which requests decodes properly
         html = resp.text
-
-        # Debug: show page title area
-        if "<title>" in html:
-            start = html.find("<title>")
-            end   = html.find("</title>", start)
-            print(f"[scraper] Page title: {html[start:end+8]}")
-        else:
-            print("[scraper] No <title> tag found in response")
 
         if "captcha" in html.lower() or "blocked" in html.lower():
             print("[scraper] WARNING: Possible block/CAPTCHA detected")
@@ -128,36 +104,49 @@ def get_soup(url: str, referer: str = "https://www.pakwheels.com/") -> Beautiful
 
 
 def parse_search_page(soup: BeautifulSoup) -> list[dict]:
-    listings = []
+    """
+    Extract listings using data-listing-id as the primary identifier.
+    This is more reliable than anchor-based selectors since all 24 cards
+    have this attribute regardless of their position in the page.
+    Uses a seen_ids set to avoid processing the same listing twice
+    (the page repeats contact_seller_div blocks which can confuse parsers).
+    """
+    listings  = []
+    seen_ids  = set()
 
-    cards = soup.select("li.classified-listing")
-    print(f"[scraper] Cards found: {len(cards)}")
-
-    # Try fallback selector
-    if not cards:
-        cards = soup.select("li[data-listing-id]")
-        print(f"[scraper] Fallback cards found: {len(cards)}")
+    # Select ALL li elements that have a data-listing-id attribute
+    cards = soup.select("li[data-listing-id]")
+    print(f"[scraper] Cards found with data-listing-id: {len(cards)}")
 
     for card in cards:
+        listing_id = card.get("data-listing-id", "").strip()
+
+        # Skip duplicates — same listing can appear in multiple ul blocks
+        if not listing_id or listing_id in seen_ids:
+            continue
+        seen_ids.add(listing_id)
+
         is_featured = "featured-listing" in card.get("class", [])
 
         if not INCLUDE_FEATURED and is_featured:
             continue
 
+        # Get URL from the car-name anchor
         anchor = card.select_one("a.car-name.ad-detail-path")
-        if not anchor:
-            anchor = card.select_one("a[href*='/used-cars/']")
-        if not anchor:
-            continue
-
-        relative_url = anchor.get("href", "")
-        url = (
-            f"https://www.pakwheels.com{relative_url}"
-            if relative_url.startswith("/")
-            else relative_url
-        )
-        title_tag = anchor.select_one("h3")
-        title = title_tag.get_text(strip=True) if title_tag else "N/A"
+        if anchor:
+            relative_url = anchor.get("href", "")
+            url = (
+                f"https://www.pakwheels.com{relative_url}"
+                if relative_url.startswith("/")
+                else relative_url
+            )
+            title_tag = anchor.select_one("h3")
+            title = title_tag.get_text(strip=True) if title_tag else "N/A"
+        else:
+            # Fallback: build URL from listing ID and title from h3
+            h3 = card.select_one("h3")
+            title = h3.get_text(strip=True) if h3 else "N/A"
+            url = f"https://www.pakwheels.com/used-cars/listing-{listing_id}"
 
         price_tag = card.select_one("div.price-details")
         price = price_tag.get_text(strip=True) if price_tag else "N/A"
@@ -173,6 +162,7 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
         transmission = specs[4].get_text(strip=True) if len(specs) > 4 else "N/A"
 
         listings.append({
+            "listing_id":   listing_id,
             "url":          url,
             "title":        title,
             "price":        price,
@@ -185,6 +175,7 @@ def parse_search_page(soup: BeautifulSoup) -> list[dict]:
             "is_featured":  is_featured,
         })
 
+    print(f"[scraper] Unique listings parsed: {len(listings)}")
     return listings
 
 
