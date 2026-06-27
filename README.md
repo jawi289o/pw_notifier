@@ -1,6 +1,6 @@
-# PakWheels Car Notifier
+# Car Notifier
 
-Scrapes PakWheels used car listings and sends Discord notifications for new listings.
+Scrapes used car listings and sends Discord notifications for new listings.
 Runs automatically every 15 minutes via GitHub Actions — completely free.
 
 ## Files
@@ -29,11 +29,8 @@ Go to your repo → **Settings → Secrets and variables → Actions** and add:
 
 ### 2. Edit config.py
 
-Change `SEARCH_URL` to your own PakWheels search URL:
+Change `SEARCH_URL` to your own search URL:
 
-```python
-SEARCH_URL = "https://www.pakwheels.com/used-cars/search/-/mk_toyota/md_vitz/yr_2014_2016/"
-```
 
 ### 3. Push to GitHub
 
@@ -45,7 +42,7 @@ git push
 
 ### 4. Test manually
 
-Go to **Actions tab → PakWheels Scraper → Run workflow**
+Go to **Actions tab → Scraper → Run workflow**
 
 ## How duplicate detection works
 
